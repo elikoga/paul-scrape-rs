@@ -1,12 +1,8 @@
 use clap::Parser;
-use futures::{future::BoxFuture, FutureExt};
-use paul_scrape_rs::{get_parsed_main_page, get_semesters};
+use indicatif::{MultiProgress, ProgressBar};
+use paul_scrape_rs::{get_semesters, parse_courses_and_branches, CoursePage, Path, ScrapeResult};
 use reqwest::Url;
-use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
-use scraper::{Html, Selector};
-use serde::Serialize;
-use std::{env, sync::Arc, time::Duration};
-use task_local_extensions::Extensions;
+use std::{collections::VecDeque, env, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
@@ -15,199 +11,193 @@ struct Args {
     // base url
     #[clap(default_value_t = Url::parse(&env::var("BASE_URL").unwrap_or("https://paul.uni-paderborn.de".to_string())).unwrap())]
     base_url: Url,
+    // semester
+    #[clap(default_value_t = env::var("SEMESTER").unwrap_or("Sommer 2023".to_string()))]
+    semester: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct Path {
-    fragments: Vec<String>,
+#[derive(Debug)]
+enum QueueEntry {
+    Main,
+    Tree(Url, Path),
+    Leaf(Url, Path),
 }
 
-impl Path {
-    fn new() -> Self {
+struct Queue {
+    queue: VecDeque<QueueEntry>,
+    bars: MultiProgress,
+    tree_bar: ProgressBar,
+    leaf_bar: ProgressBar,
+}
+
+impl Queue {
+    pub fn new() -> Self {
+        let bars = MultiProgress::new();
+        let tree_bar = bars.add(ProgressBar::new(0));
+        tree_bar.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} {bar} {pos:>7}/{len:7} ({elapsed}:{eta}) {wide_msg}")
+                .unwrap(),
+        );
+        tree_bar.set_prefix("Tree: ");
+        let leaf_bar = bars.add(ProgressBar::new(0));
+        leaf_bar.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("{prefix:.bold.dim} {bar} {pos:>7}/{len:7} ({elapsed}:{eta}) {wide_msg}")
+                .unwrap(),
+        );
+        leaf_bar.set_prefix("Leaf: ");
         Self {
-            fragments: Vec::new(),
+            queue: VecDeque::new(),
+            bars,
+            tree_bar,
+            leaf_bar,
         }
     }
 
-    fn push(&self, fragment: String) -> Self {
-        // clone the push
-        let mut path = self.clone();
-        // push the fragment
-        path.fragments.push(fragment);
-        // return the new path
-        path
+    pub fn push_back(&mut self, entry: QueueEntry) {
+        // println!("Pushing to queue: {:?}", entry);
+        let is_leaf = matches!(&entry, QueueEntry::Leaf(_, _));
+        let message = match &entry {
+            QueueEntry::Main => "pushing main page".to_string(),
+            QueueEntry::Tree(_, path) => format!("pushing tree {}", path.fragments.last().unwrap()),
+            QueueEntry::Leaf(_, path) => format!("pushing leaf {}", path.fragments.last().unwrap()),
+        };
+        if is_leaf {
+            self.leaf_bar.inc_length(1);
+            self.leaf_bar.set_message(message);
+            self.leaf_bar.tick();
+        } else {
+            self.tree_bar.inc_length(1);
+            self.tree_bar.set_message(message);
+            self.tree_bar.tick();
+        }
+        self.queue.push_back(entry)
+    }
+
+    pub fn pop(&mut self) -> Option<QueueEntry> {
+        let front = self.queue.pop_front();
+        let is_leaf = matches!(front, Some(QueueEntry::Leaf(_, _)));
+        if is_leaf {
+            self.leaf_bar.inc(1);
+        } else {
+            self.tree_bar.inc(1);
+        }
+        // println!("Popping from queue: {:?}", front);
+        front
     }
 }
 
-#[derive(Serialize, Debug, Clone)]
-struct Course {
-    #[serde(serialize_with = "url_to_string")]
-    url: Url,
-    path: Path,
-}
-
-fn url_to_string<S>(url: &Url, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_str(&url.to_string())
-}
-
+#[derive(Clone)]
 struct State {
-    courses: Vec<Course>,
+    queue: Arc<Mutex<Queue>>,
+    client: reqwest::Client,
+    base_url: Url,
+    semester: String,
+    start_time: std::time::Instant,
 }
 
-impl State {
-    fn new() -> Self {
-        Self {
-            courses: Vec::new(),
-        }
-    }
-
-    async fn push_courses(state_arc: &Arc<Mutex<Self>>, courses: Vec<Course>) {
-        let mut state = state_arc.lock().await;
-        state.courses.extend(courses);
-    }
-}
-
-struct Logger;
-
-#[async_trait::async_trait]
-impl Middleware for Logger {
-    async fn handle(
-        &self,
-        req: reqwest::Request,
-        extensions: &mut Extensions,
-        next: Next<'_>,
-    ) -> reqwest_middleware::Result<reqwest::Response> {
-        // log request
-        eprintln!("Making request: {:?}", req);
-        next.run(req, extensions).await
-    }
-}
+const REQUESTS_PER_SECOND: u64 = 20;
 
 #[tokio::main]
 async fn main() {
-    // parse cli
     let args = Args::parse();
-    let client = ClientBuilder::new(
-        reqwest::ClientBuilder::new()
-            .timeout(Duration::from_millis(60_000))
-            .build()
-            .unwrap(),
-    )
-    .with(Logger)
-    .build();
+    let base_url = args.base_url;
+    let semester = args.semester;
 
-    let state = Arc::new(Mutex::new(State::new()));
+    let queue = Arc::new(Mutex::new(Queue::new()));
 
-    let main_page = get_parsed_main_page(client.clone(), args.base_url.clone()).await;
-    let semesters = get_semesters(main_page, args.base_url);
-    let semesters: Vec<&(String, Url)> = semesters.iter().take(1).collect(); // neuter the iterator
-    let path = Path::new();
-    futures::future::join_all(semesters.iter().map(|(semester, url)| {
-        let path = path.push(semester.to_string());
-        let url = url.clone();
-        tokio::spawn(walk_tree(client.clone(), url, path, state.clone()))
-    }))
-    .await;
-    // output courses as json
-    let state = state.lock().await;
-    // to stdout
-    serde_json::to_writer_pretty(std::io::stdout(), &state.courses).unwrap();
-}
+    let state = State {
+        queue: queue.clone(),
+        client: reqwest::Client::new(),
+        base_url,
+        semester,
+        start_time: std::time::Instant::now(),
+    };
 
-async fn request_with_retry(client: &ClientWithMiddleware, url: &Url) -> String {
-    loop {
-        let response = client.get(url.as_ref()).send().await;
-        // if error, repeat
-        match response {
-            Err(err) => {
-                eprintln!("Error: {}", err);
-                continue;
-            }
-            Ok(response) => {
-                // if not 200, repeat
-                if response.status() != reqwest::StatusCode::OK {
-                    eprintln!("Status: {}", response.status());
-                    continue;
-                }
-                // else just return
-                break response.text().await.unwrap();
+    let event_loop = tokio::spawn({
+        let state = state.clone();
+        async move {
+            loop {
+                // wait 1 / REQUESTS_PER_SECOND seconds
+                tokio::time::sleep(tokio::time::Duration::from_secs_f64(
+                    1.0 / REQUESTS_PER_SECOND as f64,
+                ))
+                .await;
+                // get the queue
+                let entry = {
+                    let mut queue = state.queue.lock().await;
+                    queue.pop()
+                };
+                // if there is an entry, process it, else wait
+                let entry = match entry {
+                    Some(entry) => entry,
+                    None => continue,
+                };
+                // process the entry
+                tokio::spawn(handle_entry(entry, state.clone()));
             }
         }
+    });
+
+    // add the main page to the queue
+    {
+        let mut queue = queue.lock().await;
+        queue.push_back(QueueEntry::Main);
     }
+
+    // wait for the event loop to finish
+    event_loop.await.unwrap();
 }
 
-fn parse_courses_and_branches(
-    response: String,
-    url: &Url,
-    path: &Path,
-) -> (Vec<Course>, Vec<(Url, Path)>) {
-    let document = Html::parse_document(&response);
-    // a.courseTitle
-    let courses = Selector::parse("a.courseTitle").unwrap();
-    let courses = document.select(&courses);
-    let courses: Vec<Course> = courses
-        .map(|course| {
-            let href = course.value().attr("href").unwrap();
-            let href = url.join(href).unwrap();
-            let path = path.push(course.text().collect::<String>());
-            Course { url: href, path }
-        })
-        .collect();
-    // a.auditRegNodeLink
-    let branches = Selector::parse("a.auditRegNodeLink").unwrap();
-    let branches = document.select(&branches);
-    let branches = branches
-        .map(|a_node| {
-            let href = a_node.value().attr("href").unwrap();
-            let href = url.join(href).unwrap();
-            // take title from parent li
-            let title = a_node
-                .parent()
-                .unwrap()
-                .value()
-                .as_element()
-                .unwrap()
-                .attr("title")
-                .unwrap();
-            let path = path.push(title.to_string());
-            (href, path)
-        })
-        .collect();
-    (courses, branches)
-}
-
-fn walk_tree(
-    client: ClientWithMiddleware,
-    url: Url,
-    path: Path,
-    state: Arc<Mutex<State>>,
-) -> BoxFuture<'static, ()> {
-    async move {
-        let response = request_with_retry(&client, &url).await;
-        let (courses, branches) = parse_courses_and_branches(response, &url, &path);
-        State::push_courses(&state, courses.clone()).await;
-        // let branches: Vec<&(Url, Path)> = branches.iter().take(5).collect(); // neuter the iterator
-        let branches = futures::future::join_all(branches.iter().map(|(href, path)| {
-            let href = href.clone();
-            let path = path.clone();
-            tokio::spawn(walk_tree(client.clone(), href, path, state.clone()))
-        }));
-
-        let courses = futures::future::join_all(courses.iter().map(|course| {
-            let course = course.clone();
-            tokio::spawn(parse_course(client.clone(), course, state.clone()))
-        }));
-
-        branches.await;
+async fn handle_entry(entry: QueueEntry, state: State) {
+    match entry {
+        QueueEntry::Main => {
+            // get the main page
+            let semesters = get_semesters(state.client.clone(), &state.base_url).await;
+            // add the tree pages to the queue
+            {
+                let mut queue = state.queue.lock().await;
+                for (semester, url) in semesters {
+                    if semester != state.semester {
+                        continue;
+                    }
+                    queue.push_back(QueueEntry::Tree(url, Path::new().push(semester)));
+                }
+            }
+        }
+        QueueEntry::Tree(url, path) => {
+            // get the tree page
+            let tree_page = state.client.get(url.clone()).send().await.unwrap();
+            let (courses, branches) = parse_courses_and_branches(
+                tree_page
+                    .text()
+                    .await
+                    .expect("Failed to parse tree page. This is probably a bug in paul-scrape-rs."),
+                &url,
+                &path,
+            );
+            {
+                let mut queue = state.queue.lock().await;
+                // add the tree pages to the queue
+                for (url, path) in branches {
+                    queue.push_back(QueueEntry::Tree(url, path));
+                }
+                // add the leaf pages to the queue
+                for CoursePage { url, path } in courses {
+                    queue.push_back(QueueEntry::Leaf(url, path));
+                }
+            }
+        }
+        QueueEntry::Leaf(url, path) => {
+            // get the leaf page
+            let leaf_page = state.client.get(url.clone()).send().await.unwrap();
+            // print out length of the page
+            // println!(
+            //     "Leaf page {:?} has length {}",
+            //     path,
+            //     leaf_page.text().await.unwrap().len()
+            // );
+        }
     }
-    .boxed()
-}
-
-struct CourseData {}
-
-async fn parse_course(client: ClientWithMiddleware, course: Course, state: Arc<Mutex<State>>) {
-    todo!()
 }
