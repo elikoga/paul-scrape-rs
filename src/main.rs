@@ -1,8 +1,13 @@
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar};
-use paul_scrape_rs::{get_semesters, parse_courses_and_branches, CoursePage, Path, ScrapeResult};
+use paul_scrape_rs::{
+    get_semesters, parse_course_page, parse_courses_and_branches, parse_small_group, Course,
+    CoursePage, Path, SmallGroup,
+};
+use rand::Rng;
 use reqwest::Url;
-use std::{collections::VecDeque, env, sync::Arc};
+use serde::Serialize;
+use std::{collections::VecDeque, env, fs::File, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
@@ -20,12 +25,13 @@ struct Args {
 enum QueueEntry {
     Main,
     Tree(Url, Path),
-    Leaf(Url, Path),
+    CourseLeaf(Url, Path),
+    SmallGroupLeaf(Url, Path),
 }
 
 struct Queue {
     queue: VecDeque<QueueEntry>,
-    bars: MultiProgress,
+    _bars: MultiProgress,
     tree_bar: ProgressBar,
     leaf_bar: ProgressBar,
 }
@@ -49,7 +55,7 @@ impl Queue {
         leaf_bar.set_prefix("Leaf: ");
         Self {
             queue: VecDeque::new(),
-            bars,
+            _bars: bars,
             tree_bar,
             leaf_bar,
         }
@@ -57,11 +63,22 @@ impl Queue {
 
     pub fn push_back(&mut self, entry: QueueEntry) {
         // println!("Pushing to queue: {:?}", entry);
-        let is_leaf = matches!(&entry, QueueEntry::Leaf(_, _));
+        let is_leaf = matches!(
+            &entry,
+            QueueEntry::CourseLeaf(_, _) | QueueEntry::SmallGroupLeaf(_, _)
+        );
         let message = match &entry {
             QueueEntry::Main => "pushing main page".to_string(),
             QueueEntry::Tree(_, path) => format!("pushing tree {}", path.fragments.last().unwrap()),
-            QueueEntry::Leaf(_, path) => format!("pushing leaf {}", path.fragments.last().unwrap()),
+            QueueEntry::CourseLeaf(_, path) => {
+                format!("pushing course leaf {}", path.fragments.last().unwrap())
+            }
+            QueueEntry::SmallGroupLeaf(_, path) => {
+                format!(
+                    "pushing small_group leaf {}",
+                    path.fragments.last().unwrap()
+                )
+            }
         };
         if is_leaf {
             self.leaf_bar.inc_length(1);
@@ -76,15 +93,31 @@ impl Queue {
     }
 
     pub fn pop(&mut self) -> Option<QueueEntry> {
-        let front = self.queue.pop_front();
-        let is_leaf = matches!(front, Some(QueueEntry::Leaf(_, _)));
+        // choose random element and put at the front
+        let len = self.queue.len();
+        if len == 0 {
+            return None;
+        }
+        let idx = rand::thread_rng().gen_range(0..len);
+        // swap
+        let front = self.queue.swap_remove_front(idx).unwrap();
+        // let front = self.queue.pop_front()?;
+        let is_leaf = matches!(
+            front,
+            QueueEntry::CourseLeaf(_, _) | QueueEntry::SmallGroupLeaf(_, _)
+        );
         if is_leaf {
             self.leaf_bar.inc(1);
         } else {
             self.tree_bar.inc(1);
         }
         // println!("Popping from queue: {:?}", front);
-        front
+        Some(front)
+    }
+
+    pub fn finish(&mut self) {
+        self.tree_bar.finish();
+        self.leaf_bar.finish();
     }
 }
 
@@ -94,7 +127,18 @@ struct State {
     client: reqwest::Client,
     base_url: Url,
     semester: String,
-    start_time: std::time::Instant,
+    start_time: chrono::DateTime<chrono::Utc>,
+    courses: Arc<Mutex<Vec<Course>>>,
+    small_groups: Arc<Mutex<Vec<SmallGroup>>>,
+    running_tasks: Arc<Mutex<u64>>,
+}
+
+#[derive(Serialize)]
+struct StateSerializable {
+    semester: String,
+    start_time: chrono::DateTime<chrono::Utc>,
+    courses: Vec<Course>,
+    small_groups: Vec<SmallGroup>,
 }
 
 const REQUESTS_PER_SECOND: u64 = 20;
@@ -112,7 +156,10 @@ async fn main() {
         client: reqwest::Client::new(),
         base_url,
         semester,
-        start_time: std::time::Instant::now(),
+        start_time: chrono::Utc::now(),
+        courses: Arc::new(Mutex::new(Vec::new())),
+        small_groups: Arc::new(Mutex::new(Vec::new())),
+        running_tasks: Arc::new(Mutex::new(0)),
     };
 
     let event_loop = tokio::spawn({
@@ -132,10 +179,28 @@ async fn main() {
                 // if there is an entry, process it, else wait
                 let entry = match entry {
                     Some(entry) => entry,
-                    None => continue,
+                    None => {
+                        // check if there are any running tasks
+                        let running_tasks = {
+                            let running_tasks = state.running_tasks.lock().await;
+                            *running_tasks
+                        };
+                        if running_tasks == 0 {
+                            // if there are no running tasks, we are done
+                            break;
+                        } else {
+                            // if there are running tasks, continue
+                            continue;
+                        }
+                    }
                 };
                 // process the entry
                 tokio::spawn(handle_entry(entry, state.clone()));
+            }
+            // finish bar
+            {
+                let mut queue = state.queue.lock().await;
+                queue.finish();
             }
         }
     });
@@ -148,9 +213,23 @@ async fn main() {
 
     // wait for the event loop to finish
     event_loop.await.unwrap();
+
+    // we're done, dump state to state.json
+    let file = File::create("state.json").expect("Failed to create state.json");
+    let state = StateSerializable {
+        semester: state.semester,
+        start_time: state.start_time,
+        courses: state.courses.lock().await.clone(),
+        small_groups: state.small_groups.lock().await.clone(),
+    };
+    serde_json::to_writer_pretty(file, &state).expect("Failed to write state.json");
 }
 
 async fn handle_entry(entry: QueueEntry, state: State) {
+    {
+        let mut running_tasks = state.running_tasks.lock().await;
+        *running_tasks += 1;
+    }
     match entry {
         QueueEntry::Main => {
             // get the main page
@@ -180,24 +259,63 @@ async fn handle_entry(entry: QueueEntry, state: State) {
             {
                 let mut queue = state.queue.lock().await;
                 // add the tree pages to the queue
-                for (url, path) in branches {
+                // debug: only take the first two branches
+                // for (url, path) in branches {
+                for (url, path) in branches.into_iter().take(2) {
                     queue.push_back(QueueEntry::Tree(url, path));
                 }
                 // add the leaf pages to the queue
                 for CoursePage { url, path } in courses {
-                    queue.push_back(QueueEntry::Leaf(url, path));
+                    queue.push_back(QueueEntry::CourseLeaf(url, path));
                 }
             }
         }
-        QueueEntry::Leaf(url, path) => {
+        QueueEntry::CourseLeaf(url, path) => {
             // get the leaf page
-            let leaf_page = state.client.get(url.clone()).send().await.unwrap();
-            // print out length of the page
-            // println!(
-            //     "Leaf page {:?} has length {}",
-            //     path,
-            //     leaf_page.text().await.unwrap().len()
-            // );
+            let course_page = state.client.get(url.clone()).send().await.unwrap();
+            // parse the response
+            let (course, small_groups_links) = parse_course_page(
+                course_page.text().await.expect(
+                    "Failed to parse course page. This is probably a bug in paul-scrape-rs.",
+                ),
+                &url,
+                &path,
+            );
+
+            // add the small group pages to the queue
+            {
+                let mut queue = state.queue.lock().await;
+                for (url, path) in small_groups_links {
+                    queue.push_back(QueueEntry::SmallGroupLeaf(url, path));
+                }
+            }
+            // add the course to the list of courses
+            {
+                let mut courses = state.courses.lock().await;
+                courses.push(course);
+            }
         }
+        QueueEntry::SmallGroupLeaf(url, path) => {
+            // get the leaf page
+            let small_group_page = state.client.get(url.clone()).send().await.unwrap();
+            // parse the response
+            let small_group = parse_small_group(
+                small_group_page.text().await.expect(
+                    "Failed to parse small group page. This is probably a bug in paul-scrape-rs.",
+                ),
+                &url,
+                &path,
+            );
+
+            // add the small group to the list of small groups
+            {
+                let mut small_groups = state.small_groups.lock().await;
+                small_groups.push(small_group);
+            }
+        }
+    }
+    {
+        let mut running_tasks = state.running_tasks.lock().await;
+        *running_tasks -= 1;
     }
 }

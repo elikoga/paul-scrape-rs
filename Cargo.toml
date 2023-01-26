@@ -19,3 +19,5 @@ reqwest-retry = "0.1"
 task-local-extensions = "0.1"
 async-trait = "0.1"
 indicatif = "0.17.3"
+chrono = { version = "0.4.23", features = ["serde"] }
+rand = "0.8.5"
