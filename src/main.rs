@@ -2,11 +2,10 @@ use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar};
 use paul_scrape_rs::{
     get_semesters, parse_course_page, parse_courses_and_branches, parse_small_group, Course,
-    CoursePage, Path, SmallGroup,
+    CoursePage, Path, SmallGroup, StateSerializable,
 };
 use rand::Rng;
 use reqwest::Url;
-use serde::Serialize;
 use std::{collections::VecDeque, env, fs::File, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -133,17 +132,9 @@ struct State {
     running_tasks: Arc<Mutex<u64>>,
 }
 
-#[derive(Serialize)]
-struct StateSerializable {
-    semester: String,
-    start_time: chrono::DateTime<chrono::Utc>,
-    courses: Vec<Course>,
-    small_groups: Vec<SmallGroup>,
-}
-
 const REQUESTS_PER_SECOND: u64 = 20;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
     let args = Args::parse();
     let base_url = args.base_url;
@@ -260,8 +251,8 @@ async fn handle_entry(entry: QueueEntry, state: State) {
                 let mut queue = state.queue.lock().await;
                 // add the tree pages to the queue
                 // debug: only take the first two branches
-                // for (url, path) in branches {
-                for (url, path) in branches.into_iter().take(2) {
+                for (url, path) in branches {
+                    // for (url, path) in branches.into_iter().take(2) {
                     queue.push_back(QueueEntry::Tree(url, path));
                 }
                 // add the leaf pages to the queue
@@ -272,7 +263,21 @@ async fn handle_entry(entry: QueueEntry, state: State) {
         }
         QueueEntry::CourseLeaf(url, path) => {
             // get the leaf page
-            let course_page = state.client.get(url.clone()).send().await.unwrap();
+            let course_page = state
+                .client
+                .get(url.clone())
+                .send()
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "[{}] Failed to get course page: {} ({:?}) with error: {}",
+                        chrono::Utc::now(),
+                        url,
+                        path,
+                        e
+                    );
+                    std::process::exit(1)
+                });
             // parse the response
             let (course, small_groups_links) = parse_course_page(
                 course_page.text().await.expect(
@@ -297,7 +302,21 @@ async fn handle_entry(entry: QueueEntry, state: State) {
         }
         QueueEntry::SmallGroupLeaf(url, path) => {
             // get the leaf page
-            let small_group_page = state.client.get(url.clone()).send().await.unwrap();
+            let small_group_page = state
+                .client
+                .get(url.clone())
+                .send()
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "[{}] Failed to get small group page: {} ({:?}) with error: {}",
+                        chrono::Utc::now(),
+                        url,
+                        path,
+                        e
+                    );
+                    std::process::exit(1)
+                });
             // parse the response
             let small_group = parse_small_group(
                 small_group_page.text().await.expect(

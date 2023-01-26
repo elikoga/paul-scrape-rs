@@ -1,8 +1,8 @@
 use reqwest::{Client, Url};
 use scraper::{Html, Selector};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Path {
     pub fragments: Vec<String>,
 }
@@ -213,21 +213,21 @@ pub fn parse_courses_and_branches(
     (course_list, branch_list)
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Course {
-    path: Path,
-    instructors: String,
-    ou: String,
-    appointments: Vec<Appointment>,
-    small_groups: Vec<String>,
+    pub path: Path,
+    pub instructors: String,
+    pub ou: Option<String>,
+    pub appointments: Vec<Appointment>,
+    pub small_groups: Vec<String>,
 }
 
-#[derive(Clone, Serialize)]
-struct Appointment {
-    start_time: (String, String),
-    end_time: (String, String),
-    room: String,
-    instructors: String,
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Appointment {
+    pub start_time: (String, String),
+    pub end_time: (String, String),
+    pub room: String,
+    pub instructors: String,
 }
 
 pub fn parse_course_page(response: String, url: &Url, path: &Path) -> (Course, Vec<(Url, Path)>) {
@@ -266,12 +266,13 @@ pub fn parse_course_page(response: String, url: &Url, path: &Path) -> (Course, V
     let ou = document
         .select(&Selector::parse("span[name=courseOrgUnit]").unwrap())
         .next()
-        .unwrap_or_else(|| panic!("No courseOrgUnit found in {:?}", path.push(title.clone())))
-        .text()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string();
+        // .unwrap_or_else(|| panic!("No courseOrgUnit found in {:?}", path.push(title.clone())))
+        // .text()
+        // .collect::<Vec<_>>()
+        // .join(" ")
+        // .trim()
+        // .to_string();
+        .map(|span| span.text().collect::<Vec<_>>().join(" ").trim().to_string());
 
     let appointments_list = extract_appointments(&document);
 
@@ -378,11 +379,11 @@ fn extract_appointments(document: &Html) -> Vec<Appointment> {
     appointments_list
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SmallGroup {
-    url: String,
-    path: Path,
-    appointments: Vec<Appointment>,
+    pub url: String,
+    pub path: Path,
+    pub appointments: Vec<Appointment>,
 }
 
 pub fn parse_small_group(response: String, url: &Url, path: &Path) -> SmallGroup {
@@ -410,4 +411,12 @@ pub fn parse_small_group(response: String, url: &Url, path: &Path) -> SmallGroup
         path: path.push(title),
         appointments: appointments_list,
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct StateSerializable {
+    pub semester: String,
+    pub start_time: chrono::DateTime<chrono::Utc>,
+    pub courses: Vec<Course>,
+    pub small_groups: Vec<SmallGroup>,
 }
