@@ -1,17 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Datelike, Timelike};
 use paul_scrape_rs::{SmallGroup, StateSerializable};
 use serde::Serialize;
+use sha2::Digest;
 
-#[derive(Serialize)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Clone)]
 struct Semester {
     name: String,
     created: String,
     courses: Vec<PaulineCourse>,
 }
 
-#[derive(Serialize)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Clone)]
 struct PaulineCourse {
     cid: String,
     name: String,
@@ -22,13 +23,13 @@ struct PaulineCourse {
     appointments: Vec<PaulineAppointment>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Clone)]
 struct PaulineSmallGroup {
     name: String,
     appointments: Vec<PaulineAppointment>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Clone)]
 struct PaulineAppointment {
     start_time: String,
     end_time: String,
@@ -58,7 +59,8 @@ fn main() {
         .collect();
 
     // now we can convert the courses:
-    let mut courses = Vec::new();
+    let mut courses = HashSet::new();
+    let mut seen_cids = HashSet::new();
     for course in state.courses {
         let appointments = course
             .appointments
@@ -80,10 +82,31 @@ fn main() {
             .unwrap()
             .lines()
             .collect::<Vec<&str>>();
-        let cid = cid_title[0].to_string();
+        let mut cid = cid_title[0].to_string();
         let name = cid_title[1].to_string();
 
-        courses.push(PaulineCourse {
+        // hash name+instructors
+        let name_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest(format!("{}{}", name, course.instructors).as_bytes())
+        );
+
+        // add 2 chars of hash to cid
+        cid.push('|');
+        cid.push_str(&name_hash[..2]);
+
+        // // if we've seen this cid before, add a number to it
+        // let mut cid = o_cid.clone();
+        // let mut i = 0;
+        // while seen_cids.contains(&cid) {
+        //     cid = format!("{}:{}", o_cid, i);
+        //     i += 1;
+        // }
+
+        // add to seen_cids
+        seen_cids.insert(cid.clone());
+
+        courses.insert(PaulineCourse {
             cid,
             name,
             description: Some("".to_string()),
@@ -93,6 +116,36 @@ fn main() {
             appointments,
         });
     }
+
+    let mut courses_hashmap: HashMap<String, Vec<PaulineCourse>> = HashMap::new();
+
+    for course in courses {
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            courses_hashmap.entry(course.cid.clone())
+        {
+            e.insert(Vec::new());
+            courses_hashmap.get_mut(&course.cid).unwrap().push(course);
+        } else {
+            let vec = courses_hashmap.get_mut(&course.cid).unwrap();
+            // push, sort and adjust cid s
+            vec.push(course.clone());
+            // set all cid s to the key
+            for c in vec.iter_mut() {
+                c.cid = course.cid.clone();
+            }
+            // sort
+            vec.sort();
+            // adjust cid s
+            for (i, c) in vec.iter_mut().enumerate() {
+                c.cid = format!("{}:{}", course.cid, i);
+            }
+        }
+    }
+
+    let courses_vec = courses_hashmap
+        .into_iter()
+        .flat_map(|(_, v)| v)
+        .collect::<Vec<PaulineCourse>>();
 
     let semester = Semester {
         name: state.semester,
@@ -105,7 +158,7 @@ fn main() {
             state.start_time.minute(),
             state.start_time.second()
         ),
-        courses,
+        courses: courses_vec,
     };
 
     let semester_json = serde_json::to_string_pretty(&semester).unwrap();
