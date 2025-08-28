@@ -248,7 +248,7 @@ pub fn parse_course_page(response: String, url: &Url, path: &Path) -> (Course, V
         .select(&Selector::parse("form[name=courseform]").unwrap())
         .next()
         // .unwrap() // todo
-        .unwrap_or_else(|| panic!("No courseform found in {:?}", path))
+        .unwrap_or_else(|| panic!("No courseform found in {:?}, html: {}", path, response))
         .select(&Selector::parse("h1").unwrap())
         .next()
         .unwrap()
@@ -396,7 +396,7 @@ pub fn parse_small_group(response: String, url: &Url, path: &Path) -> SmallGroup
         .select(&Selector::parse("form[name=courseform]").unwrap())
         .next()
         // .unwrap() // todo
-        .unwrap_or_else(|| panic!("No courseform found in {:?}", path))
+        .unwrap_or_else(|| panic!("No courseform found in {:?}, html: {}", path, response))
         .select(&Selector::parse("h2").unwrap())
         .next()
         .unwrap()
