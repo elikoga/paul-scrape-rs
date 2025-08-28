@@ -236,9 +236,22 @@ async fn handle_entry(entry: QueueEntry, state: State) {
                 }
             }
         }
-        QueueEntry::Tree(url, path) => {
+        QueueEntry::Tree(url, path) => 'handle_tree: {
             // get the tree page
             let tree_page = state.client.get(url.clone()).send().await.unwrap();
+            // if response is not success, re-enqueue the tree page and break
+            if !tree_page.status().is_success() {
+                eprintln!(
+                    "[{}] Failed to get tree page: {} ({:?}) with status: {}. Re-enqueueing.",
+                    chrono::Utc::now(),
+                    url,
+                    path,
+                    tree_page.status()
+                );
+                let mut queue = state.queue.lock().await;
+                queue.push_back(QueueEntry::Tree(url, path));
+                break 'handle_tree;
+            }
             let (courses, branches) = parse_courses_and_branches(
                 tree_page
                     .text()
@@ -261,7 +274,7 @@ async fn handle_entry(entry: QueueEntry, state: State) {
                 }
             }
         }
-        QueueEntry::CourseLeaf(url, path) => {
+        QueueEntry::CourseLeaf(url, path) => 'handle_course: {
             // get the leaf page
             let course_page = state
                 .client
@@ -278,6 +291,19 @@ async fn handle_entry(entry: QueueEntry, state: State) {
                     );
                     std::process::exit(1)
                 });
+            // if response is not success, re-enqueue the course page and break
+            if !course_page.status().is_success() {
+                eprintln!(
+                    "[{}] Failed to get course page: {} ({:?}) with status: {}. Re-enqueueing.",
+                    chrono::Utc::now(),
+                    url,
+                    path,
+                    course_page.status()
+                );
+                let mut queue = state.queue.lock().await;
+                queue.push_back(QueueEntry::CourseLeaf(url, path));
+                break 'handle_course;
+            }
             // parse the response
             let (course, small_groups_links) = parse_course_page(
                 course_page.text().await.expect(
@@ -300,7 +326,7 @@ async fn handle_entry(entry: QueueEntry, state: State) {
                 courses.push(course);
             }
         }
-        QueueEntry::SmallGroupLeaf(url, path) => {
+        QueueEntry::SmallGroupLeaf(url, path) => 'handle_small_group: {
             // get the leaf page
             let small_group_page = state
                 .client
@@ -317,6 +343,19 @@ async fn handle_entry(entry: QueueEntry, state: State) {
                     );
                     std::process::exit(1)
                 });
+            // if response is not success, re-enqueue the small group page and break
+            if !small_group_page.status().is_success() {
+                eprintln!(
+                    "[{}] Failed to get small group page: {} ({:?}) with status: {}. Re-enqueueing.",
+                    chrono::Utc::now(),
+                    url,
+                    path,
+                    small_group_page.status()
+                );
+                let mut queue = state.queue.lock().await;
+                queue.push_back(QueueEntry::SmallGroupLeaf(url, path));
+                break 'handle_small_group;
+            }
             // parse the response
             let small_group = parse_small_group(
                 small_group_page.text().await.expect(
