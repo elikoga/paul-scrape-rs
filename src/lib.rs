@@ -247,7 +247,8 @@ pub fn parse_course_page(response: String, url: &Url, path: &Path) -> (Course, V
     let title = document
         .select(&Selector::parse("form[name=courseform]").unwrap())
         .next()
-        .unwrap()
+        // .unwrap() // todo
+        .unwrap_or_else(|| panic!("No courseform found in {:?}", path))
         .select(&Selector::parse("h1").unwrap())
         .next()
         .unwrap()
@@ -394,7 +395,8 @@ pub fn parse_small_group(response: String, url: &Url, path: &Path) -> SmallGroup
     let title = document
         .select(&Selector::parse("form[name=courseform]").unwrap())
         .next()
-        .unwrap()
+        // .unwrap() // todo
+        .unwrap_or_else(|| panic!("No courseform found in {:?}", path))
         .select(&Selector::parse("h2").unwrap())
         .next()
         .unwrap()
