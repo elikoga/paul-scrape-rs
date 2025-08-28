@@ -16,7 +16,7 @@ struct Args {
     #[clap(default_value_t = Url::parse(&env::var("BASE_URL").unwrap_or("https://paul.uni-paderborn.de".to_string())).unwrap())]
     base_url: Url,
     // semester
-    #[clap(default_value_t = env::var("SEMESTER").unwrap_or("Sommer 2023".to_string()))]
+    #[clap(default_value_t = env::var("SEMESTER").unwrap_or("Winter 2025/26".to_string()))]
     semester: String,
 }
 

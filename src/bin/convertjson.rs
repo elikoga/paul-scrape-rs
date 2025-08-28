@@ -68,12 +68,6 @@ fn main() {
             .map(convert_appointment)
             .collect();
 
-        let small_groups = course
-            .small_groups
-            .into_iter()
-            .map(|sg| small_groups.get(&sg).unwrap().clone())
-            .collect();
-
         // cid,name comes from splitting the last path entry to a newline
         let cid_title = course
             .path
@@ -83,7 +77,36 @@ fn main() {
             .lines()
             .collect::<Vec<&str>>();
         let mut cid = cid_title[0].to_string();
-        let name = cid_title[1].to_string();
+        // let name = cid_title[1].to_string();
+        // if len of cid_title is 1, fail hard and show the path
+        let name = if cid_title.len() == 1 {
+            // panic!("No name found in path: {:?}", course.path)
+            // just continue and log
+            eprintln!("No name found in path: {:?}", course.path);
+            // rewrite cid: THIS_COURSE_HAS_NO_CID
+            cid = "THIS.COURSE.HAS.NO.COURSE.ID".to_string();
+            cid_title[0].to_string()
+        } else {
+            cid_title[1].to_string()
+        };
+
+
+        let small_groups = course
+            .small_groups
+            .into_iter()
+            .map(|sg| small_groups.get(&sg).unwrap().clone())
+            .map(|sg| {
+                // if the name of this small group is the same as the course, add (Kleingruppe) to the name
+                if sg.name == name {
+                    PaulineSmallGroup {
+                        name: format!("{} (Kleingruppe)", sg.name),
+                        appointments: sg.appointments,
+                    }
+                } else {
+                    sg
+                }
+            })
+            .collect();
 
         // hash name+instructors
         let name_hash = format!(
