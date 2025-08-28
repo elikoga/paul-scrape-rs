@@ -132,7 +132,7 @@ struct State {
     running_tasks: Arc<Mutex<u64>>,
 }
 
-const REQUESTS_PER_SECOND: u64 = 20;
+const REQUESTS_PER_SECOND: u64 = 35;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
