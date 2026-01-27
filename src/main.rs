@@ -18,6 +18,10 @@ struct Args {
     // semester
     #[clap(default_value_t = env::var("SEMESTER").unwrap_or("Winter 2025/26".to_string()))]
     semester: String,
+
+    /// List all available semesters
+    #[clap(long, short)]
+    list_semesters: bool,
 }
 
 #[derive(Debug)]
@@ -137,6 +141,16 @@ const REQUESTS_PER_SECOND: u64 = 35;
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
     let args = Args::parse();
+    
+    if args.list_semesters {
+        let client = reqwest::Client::new();
+        let semesters = get_semesters(client, &args.base_url).await;
+        for (semester, _) in semesters {
+            println!("{}", semester);
+        }
+        return;
+    }
+
     let base_url = args.base_url;
     let semester = args.semester;
 
