@@ -10,6 +10,7 @@ struct Semester {
     name: String,
     created: String,
     courses: Vec<PaulineCourse>,
+    preview_date: Option<String>,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Clone)]
@@ -170,6 +171,8 @@ fn main() {
         .flat_map(|(_, v)| v)
         .collect::<Vec<PaulineCourse>>();
 
+    let preview_date = calculate_preview_date(&courses_vec);
+
     let semester = Semester {
         name: state.semester,
         created: format!(
@@ -182,6 +185,7 @@ fn main() {
             state.start_time.second()
         ),
         courses: courses_vec,
+        preview_date,
     };
 
     let semester_json = serde_json::to_string_pretty(&semester).unwrap();
@@ -266,4 +270,64 @@ fn convert_small_group(sg: &SmallGroup) -> PaulineSmallGroup {
         name,
         appointments: sg.appointments.iter().map(convert_appointment).collect(),
     }
+}
+
+fn calculate_preview_date(courses: &[PaulineCourse]) -> Option<String> {
+    let mut appointments_per_day: HashMap<chrono::NaiveDate, usize> = HashMap::new();
+
+    for course in courses {
+        for appointment in &course.appointments {
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(&appointment.start_time[..10], "%Y-%m-%d") {
+                *appointments_per_day.entry(date).or_insert(0) += 1;
+            }
+        }
+        for sg in &course.small_groups {
+            for appointment in &sg.appointments {
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(&appointment.start_time[..10], "%Y-%m-%d") {
+                    *appointments_per_day.entry(date).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // (year, week) -> count of busy days
+    let mut weeks: HashMap<(i32, u32), HashSet<chrono::NaiveDate>> = HashMap::new();
+
+    for (date, count) in &appointments_per_day {
+        // Threshold for "busy day". 
+        // Since we are aggregating across ALL courses, a regular lecture day should have hundreds/thousands of appointments.
+        // Let's say 100 to be safe.
+        if *count > 100 {
+            let week = date.iso_week().week();
+            let year = date.iso_week().year();
+            weeks.entry((year, week)).or_default().insert(*date);
+        }
+    }
+
+    let mut sorted_weeks: Vec<_> = weeks.keys().collect();
+    sorted_weeks.sort();
+
+    for week_key in sorted_weeks {
+        let days = weeks.get(week_key).unwrap();
+        // Check if we have 5 days (Mon-Fri)
+        let mut weekdays = 0;
+        for day in days {
+            match day.weekday() {
+                chrono::Weekday::Mon | chrono::Weekday::Tue | chrono::Weekday::Wed | chrono::Weekday::Thu | chrono::Weekday::Fri => {
+                    weekdays += 1;
+                }
+                _ => {}
+            }
+        }
+
+        if weekdays >= 5 {
+            // Return the Monday of this week
+            let (year, week) = week_key;
+            if let Some(monday) = chrono::NaiveDate::from_isoywd_opt(*year, *week, chrono::Weekday::Mon) {
+                return Some(monday.format("%Y-%m-%d").to_string());
+            }
+        }
+    }
+
+    None
 }
