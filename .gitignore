@@ -1,3 +1,4 @@
 /target
 *.json
-*.out
+*.out.api_key
+.api_key
