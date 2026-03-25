@@ -1,0 +1,36 @@
+name: Daily PAUL Scrape
+
+on:
+  schedule:
+    # 04:00 UTC daily — 06:00 Berlin (CET) / 05:00 (CEST).
+    # Runs after paul.uni-paderborn.de nightly maintenance window.
+    - cron: '0 4 * * *'
+  # Allow manual trigger for ad-hoc re-scrapes.
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Caches ~/.cargo/registry, ~/.cargo/git, and ./target keyed on
+      # Cargo.lock. Vendored openssl-src build is included in target cache
+      # so it does not recompile on every run.
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Write the secret to the file scrape.sh reads.
+      # Mask is already active for secrets; the file is never committed
+      # (.gitignore covers .api_key).
+      - name: Write API key
+        run: printf '%s' "$PAULINE_API_KEY" > .api_key
+        env:
+          PAULINE_API_KEY: ${{ secrets.PAULINE_API_KEY }}
+
+      - name: Scrape and upload
+        run: bash scrape.sh --upload
