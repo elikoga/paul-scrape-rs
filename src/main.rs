@@ -9,6 +9,13 @@ use reqwest::Url;
 use std::{collections::VecDeque, env, fs::File, sync::Arc};
 use tokio::sync::Mutex;
 
+fn default_requests_per_second() -> u64 {
+    env::var("REQUESTS_PER_SECOND")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(35)
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
@@ -22,6 +29,10 @@ struct Args {
     /// List all available semesters
     #[clap(long, short)]
     list_semesters: bool,
+
+    /// Maximum requests per second for scraping.
+    #[clap(long, default_value_t = default_requests_per_second())]
+    requests_per_second: u64,
 }
 
 #[derive(Debug)]
@@ -131,17 +142,21 @@ struct State {
     base_url: Url,
     semester: String,
     start_time: chrono::DateTime<chrono::Utc>,
+    requests_per_second: u64,
     courses: Arc<Mutex<Vec<Course>>>,
     small_groups: Arc<Mutex<Vec<SmallGroup>>>,
     running_tasks: Arc<Mutex<u64>>,
 }
 
-const REQUESTS_PER_SECOND: u64 = 35;
-
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
     let args = Args::parse();
-    
+
+    if args.requests_per_second == 0 {
+        eprintln!("Error: --requests-per-second must be greater than 0.");
+        std::process::exit(2);
+    }
+
     if args.list_semesters {
         let client = reqwest::Client::new();
         let semesters = get_semesters(client, &args.base_url).await;
@@ -162,6 +177,7 @@ async fn main() {
         base_url,
         semester,
         start_time: chrono::Utc::now(),
+        requests_per_second: args.requests_per_second,
         courses: Arc::new(Mutex::new(Vec::new())),
         small_groups: Arc::new(Mutex::new(Vec::new())),
         running_tasks: Arc::new(Mutex::new(0)),
@@ -171,9 +187,9 @@ async fn main() {
         let state = state.clone();
         async move {
             loop {
-                // wait 1 / REQUESTS_PER_SECOND seconds
+                // wait 1 / requests_per_second seconds
                 tokio::time::sleep(tokio::time::Duration::from_secs_f64(
-                    1.0 / REQUESTS_PER_SECOND as f64,
+                    1.0 / state.requests_per_second as f64,
                 ))
                 .await;
                 // get the queue
